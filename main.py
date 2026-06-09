@@ -6,14 +6,12 @@ import re
 import time
 import urllib3
 import trafilatura
-import google.generativeai as genai
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from datetime import datetime, timezone
 
 # ─────────────────────────────────────────────
 # غیرفعال کردن هشدارهای SSL
-# (بعضی سایت‌های دولتی پرتغال گواهی SSL مشکل‌دار دارند)
 # ─────────────────────────────────────────────
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -33,13 +31,7 @@ SEEN_FILE = "seen_articles.json"
 
 MAX_PER_RUN = 5
 
-
-# ─────────────────────────────────────────────
-# تنظیم هوش مصنوعی Gemini
-# ─────────────────────────────────────────────
-
-genai.configure(api_key=GEMINI_KEY)
-gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+GEMINI_MODEL = "gemini-2.0-flash"
 
 
 # ─────────────────────────────────────────────
@@ -401,8 +393,6 @@ KEYWORDS = [
 
 # ─────────────────────────────────────────────
 # عبارات غیرخبری که باید حذف شوند
-# (لینک‌های شبکه اجتماعی، سیاست حریم خصوصی،
-#  تبلیغات و غیره که خبر نیستند)
 # ─────────────────────────────────────────────
 
 SKIP_PATTERNS = [
@@ -458,7 +448,6 @@ def save_seen(seen):
 
 # ─────────────────────────────────────────────
 # بررسی اینکه عنوان یک خبر واقعی باشد
-# و نه لینک شبکه اجتماعی یا سیاست حریم خصوصی
 # ─────────────────────────────────────────────
 
 def is_junk_title(title):
@@ -475,8 +464,7 @@ def is_junk_title(title):
 
 
 # ─────────────────────────────────────────────
-# تشخیص مرتبط بودن خبر با استفاده از
-# کلمات کلیدی (با مرز کلمه برای دقت بیشتر)
+# تشخیص مرتبط بودن خبر
 # ─────────────────────────────────────────────
 
 def is_relevant(text):
@@ -493,7 +481,6 @@ def is_relevant(text):
 
 # ─────────────────────────────────────────────
 # دریافت متن کامل خبر از یک لینک
-# (با پشتیبانی از سایت‌هایی که SSL مشکل دارند)
 # ─────────────────────────────────────────────
 
 def extract_full_text(url):
@@ -555,7 +542,6 @@ def get_rss_items(source):
 
 # ─────────────────────────────────────────────
 # دریافت خبر از HTML / اسکرپینگ ساده
-# (با پشتیبانی از سایت‌هایی که SSL مشکل دارند)
 # ─────────────────────────────────────────────
 
 def get_html_items(source):
@@ -615,7 +601,6 @@ def get_html_items(source):
 
 # ─────────────────────────────────────────────
 # دریافت آیتم‌ها از هر منبع
-# اول RSS، اگر نشد HTML
 # ─────────────────────────────────────────────
 
 def get_source_items(source):
@@ -632,13 +617,14 @@ def get_source_items(source):
 
 # ─────────────────────────────────────────────
 # ارسال متن به Gemini برای ترجمه و بازنویسی
+# (از طریق REST API مستقیم - بدون نیاز به
+#  کتابخانه google.generativeai)
 # ─────────────────────────────────────────────
 
 def translate_and_format(title, body, source_name, source_kind, link, category):
     body = body or ""
 
-    prompt = f"""
-تو سردبیر یک کانال خبری فارسی برای ایرانیان مقیم پرتغال هستی.
+    prompt = f"""تو سردبیر یک کانال خبری فارسی برای ایرانیان مقیم پرتغال هستی.
 
 یک خبر یا اطلاعیه پرتغالی/انگلیسی داری که باید آن را برای مخاطبان فارسی‌زبان آماده کنی.
 
@@ -648,11 +634,11 @@ def translate_and_format(title, body, source_name, source_kind, link, category):
 قوانین بسیار مهم:
 ۱. فقط بر اساس اطلاعات موجود در متن بنویس. چیزی اضافه نکن و حدس نزن.
 ۲. تاریخ‌ها، اعداد، مهلت‌ها، نام نهادها و اصطلاحات رسمی را دقیق حفظ کن.
-۳. اگر خبر درباره قانون است، دقت کن که آیا قانون تصویب شده یا فقط پیشنهاد/طرح/بحث است.
-۴. اگر در متن منبع تاریخ اجرا، مهلت یا جزئیات مهم مشخص نشده، بنویس: در متن منبع مشخص نشده است.
-۵. اگر منبع رسانه‌ای است و نه رسمی، در جزئیات با احتیاط اشاره کن که این خبر از منبع رسانه‌ای منتشر شده است.
+۳. اگر خبر درباره قانون است، دقت کن که آیا قانون تصویب شده یا فقط پیشنهاد است.
+۴. اگر در متن منبع تاریخ اجرا یا مهلت مشخص نشده، بنویس: در متن منبع مشخص نشده است.
+۵. اگر منبع رسانه‌ای است و نه رسمی، با احتیاط اشاره کن که از منبع رسانه‌ای است.
 ۶. نثر فارسی باید روان، واضح و حرفه‌ای باشد. نه خشک و نه خیلی عامیانه.
-۷. اگر خبر برای ایرانیان مقیم پرتغال اهمیت عملی ندارد، متن را خیلی کوتاه و محتاطانه بنویس.
+۷. اگر خبر برای ایرانیان مقیم پرتغال اهمیت عملی ندارد، متن را خیلی کوتاه بنویس.
 ۸. متن نباید تبلیغاتی، احساسی یا اغراق‌آمیز باشد.
 ۹. از کپی‌برداری طولانی از متن منبع خودداری کن.
 ۱۰. خروجی باید برای انتشار در تلگرام مناسب باشد.
@@ -677,24 +663,46 @@ SUMMARY: [خلاصه خبر در ۲ تا ۴ جمله، به اندازه‌ای 
 
 DETAILS: [جزئیات مهم خبر در چند نکته کوتاه و کاربردی. اگر جزئیات مهمی در متن نیست، بنویس: جزئیات بیشتری در متن منبع ارائه نشده است.]
 
-TAGS: [۳ تا ۵ هشتگ مرتبط فارسی، مثل #پرتغال #مهاجرت #اقامت]
-"""
+TAGS: [۳ تا ۵ هشتگ مرتبط فارسی، مثل #پرتغال #مهاجرت #اقامت]"""
 
     try:
-        response = gemini_model.generate_content(
-            prompt,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.2,
-                max_output_tokens=1000,
-            )
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_KEY}"
+
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": prompt
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": 1000
+            }
+        }
+
+        response = requests.post(
+            api_url,
+            json=payload,
+            timeout=60
         )
 
-        if response.parts:
-            ai_text = response.text
-            return parse_ai_output(ai_text, title)
-        else:
-            print(f"  هوش مصنوعی پاسخ خالی داد برای: {title[:60]}")
+        result = response.json()
+
+        if "candidates" not in result:
+            print(f"  خطای API جیمینی: {json.dumps(result, ensure_ascii=False)[:300]}")
             return None
+
+        if not result["candidates"]:
+            print(f"  پاسخ خالی از جیمینی برای: {title[:60]}")
+            return None
+
+        ai_text = result["candidates"][0]["content"]["parts"][0]["text"]
+
+        return parse_ai_output(ai_text, title)
 
     except Exception as e:
         print(f"  خطا در هوش مصنوعی برای [{title[:60]}]: {type(e).__name__}: {e}")
@@ -755,7 +763,7 @@ def parse_ai_output(text, fallback_title):
 
 
 # ─────────────────────────────────────────────
-# ساخت پیام نهایی تلگرام بر اساس قالب شما
+# ساخت پیام نهایی تلگرام
 # ─────────────────────────────────────────────
 
 def build_telegram_message(data, source_name, link, group_link):
@@ -809,11 +817,14 @@ def send_to_telegram(message):
 
         if response.status_code == 200:
             print("  پیام با موفقیت به تلگرام ارسال شد.")
+            return True
         else:
-            print(f"  خطا در ارسال تلگرام: {response.text}")
+            print(f"  خطا در ارسال تلگرام: {response.text[:300]}")
+            return False
 
     except Exception as e:
         print(f"  خطا در اتصال به تلگرام: {e}")
+        return False
 
 
 # ─────────────────────────────────────────────
@@ -823,6 +834,7 @@ def send_to_telegram(message):
 def main():
     print("شروع اجرای برنامه")
     print(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
+    print(f"مدل هوش مصنوعی: {GEMINI_MODEL}")
 
     seen = load_seen()
     posted = 0
@@ -886,9 +898,9 @@ def main():
                     group_link=TG_GROUP_LINK
                 )
 
-                send_to_telegram(telegram_message)
-
-                posted += 1
+                if send_to_telegram(telegram_message):
+                    posted += 1
+                    print(f"  پست شماره {posted} ارسال شد")
 
                 time.sleep(3)
 
