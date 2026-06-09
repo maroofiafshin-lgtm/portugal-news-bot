@@ -2,10 +2,22 @@ import feedparser
 import requests
 import os
 import json
+import re
+import time
+import urllib3
 import trafilatura
+import google.generativeai as genai
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from datetime import datetime, timezone
+
+# ─────────────────────────────────────────────
+# غیرفعال کردن هشدارهای SSL
+# (بعضی سایت‌های دولتی پرتغال گواهی SSL مشکل‌دار دارند)
+# ─────────────────────────────────────────────
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 
 # ─────────────────────────────────────────────
 # تنظیمات اصلی
@@ -15,13 +27,19 @@ GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 TG_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TG_CHANNEL = os.environ["TELEGRAM_CHANNEL_ID"]
 
-# لینک گروه تلگرامی شما
 TG_GROUP_LINK = "https://t.me/LifeInPortugalGroup"
 
 SEEN_FILE = "seen_articles.json"
 
-# حداکثر تعداد پیام‌هایی که در هر بار اجرای برنامه ارسال می‌شود
 MAX_PER_RUN = 5
+
+
+# ─────────────────────────────────────────────
+# تنظیم هوش مصنوعی Gemini
+# ─────────────────────────────────────────────
+
+genai.configure(api_key=GEMINI_KEY)
+gemini_model = genai.GenerativeModel("gemini-1.5-flash")
 
 
 # ─────────────────────────────────────────────
@@ -29,7 +47,6 @@ MAX_PER_RUN = 5
 # ─────────────────────────────────────────────
 
 SOURCES = [
-    # منابع رسمی و حکومتی پرتغال
     {
         "name": "AIMA",
         "url": "https://aima.gov.pt/pt/noticias",
@@ -149,8 +166,6 @@ SOURCES = [
         "kind": "specialized",
         "category": "consumer_rights"
     },
-
-    # منابع اعتصاب، حمل‌ونقل و اختلال خدمات
     {
         "name": "BTE - Boletim do Trabalho e Emprego",
         "url": "https://bte.gep.mtsss.gov.pt",
@@ -221,8 +236,6 @@ SOURCES = [
         "kind": "official",
         "category": "travel"
     },
-
-    # منابع اتحادیه اروپا
     {
         "name": "Your Europe",
         "url": "https://europa.eu/youreurope/citizens/index_pt.htm",
@@ -244,8 +257,6 @@ SOURCES = [
         "kind": "official",
         "category": "eu_migration"
     },
-
-    # رسانه‌های خبری معتبر
     {
         "name": "Lusa",
         "url": "https://www.lusa.pt",
@@ -345,7 +356,6 @@ SOURCES = [
 # ─────────────────────────────────────────────
 
 KEYWORDS = [
-    # مهاجرت و اقامت
     "AIMA",
     "SEF",
     "imigração",
@@ -358,12 +368,8 @@ KEYWORDS = [
     "reagrupamento familiar",
     "manifestação de interesse",
     "cartão de residência",
-
-    # تابعیت
     "nacionalidade",
     "cidadania",
-
-    # مالیات
     "IRS",
     "IRC",
     "IVA",
@@ -375,8 +381,6 @@ KEYWORDS = [
     "imposto",
     "benefício fiscal",
     "finanças",
-
-    # کار و بیمه
     "Segurança Social",
     "contrato de trabalho",
     "salário mínimo",
@@ -384,23 +388,52 @@ KEYWORDS = [
     "desemprego",
     "ACT",
     "trabalhadores estrangeiros",
-
-    # اعتصاب و حمل‌ونقل
     "greve",
     "paralisação",
     "sindicato",
     "transportes",
-    "CP",
-    "Metro",
-    "Carris",
-    "STCP",
-    "TAP",
     "aeroporto",
-
-    # سلامت
     "SNS",
     "centro de saúde",
     "utente",
+]
+
+
+# ─────────────────────────────────────────────
+# عبارات غیرخبری که باید حذف شوند
+# (لینک‌های شبکه اجتماعی، سیاست حریم خصوصی،
+#  تبلیغات و غیره که خبر نیستند)
+# ─────────────────────────────────────────────
+
+SKIP_PATTERNS = [
+    "privacidade",
+    "privacy",
+    "cookie",
+    "newsletter",
+    "facebook",
+    "instagram",
+    "twitter",
+    "linkedin",
+    "youtube",
+    "logótipo",
+    "logo",
+    "contactar",
+    "contacto",
+    "contact us",
+    "oferta exclusiva",
+    "subscrever",
+    "subscribe",
+    "miles&go",
+    "programa de fidelidade",
+    "business activity",
+    "our business",
+    "termos e condições",
+    "terms and conditions",
+    "mapa do site",
+    "sitemap",
+    "dados pessoais",
+    "personal data",
+    "política de",
 ]
 
 
@@ -424,39 +457,65 @@ def save_seen(seen):
 
 
 # ─────────────────────────────────────────────
-# تشخیص مرتبط بودن خبر
+# بررسی اینکه عنوان یک خبر واقعی باشد
+# و نه لینک شبکه اجتماعی یا سیاست حریم خصوصی
 # ─────────────────────────────────────────────
 
-def is_relevant(text):
-    if not text:
-        return False
+def is_junk_title(title):
+    if not title:
+        return True
 
-    text_lower = text.lower()
+    title_lower = title.lower()
 
-    for keyword in KEYWORDS:
-        if keyword.lower() in text_lower:
+    for pattern in SKIP_PATTERNS:
+        if pattern in title_lower:
             return True
 
     return False
 
 
 # ─────────────────────────────────────────────
-# دریافت متن کامل خبر
+# تشخیص مرتبط بودن خبر با استفاده از
+# کلمات کلیدی (با مرز کلمه برای دقت بیشتر)
+# ─────────────────────────────────────────────
+
+def is_relevant(text):
+    if not text:
+        return False
+
+    for keyword in KEYWORDS:
+        pattern = r'\b' + re.escape(keyword) + r'\b'
+        if re.search(pattern, text, re.IGNORECASE):
+            return True
+
+    return False
+
+
+# ─────────────────────────────────────────────
+# دریافت متن کامل خبر از یک لینک
+# (با پشتیبانی از سایت‌هایی که SSL مشکل دارند)
 # ─────────────────────────────────────────────
 
 def extract_full_text(url):
     try:
-        downloaded = trafilatura.fetch_url(url)
-        if downloaded:
+        response = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=20,
+            verify=False
+        )
+
+        if response.status_code == 200:
             text = trafilatura.extract(
-                downloaded,
+                response.text,
                 include_comments=False,
                 include_tables=False
             )
             if text:
                 return text
-    except:
-        pass
+
+    except Exception as e:
+        print(f"  خطا در دریافت متن کامل: {e}")
 
     return ""
 
@@ -489,13 +548,14 @@ def get_rss_items(source):
                 })
 
     except Exception as e:
-        print(f"خطا در RSS منبع {source['name']}: {e}")
+        print(f"  خطا در RSS منبع {source['name']}: {e}")
 
     return items
 
 
 # ─────────────────────────────────────────────
 # دریافت خبر از HTML / اسکرپینگ ساده
+# (با پشتیبانی از سایت‌هایی که SSL مشکل دارند)
 # ─────────────────────────────────────────────
 
 def get_html_items(source):
@@ -509,7 +569,8 @@ def get_html_items(source):
         response = requests.get(
             source["url"],
             headers=headers,
-            timeout=20
+            timeout=20,
+            verify=False
         )
 
         soup = BeautifulSoup(response.text, "html.parser")
@@ -524,7 +585,10 @@ def get_html_items(source):
             if not title or not href:
                 continue
 
-            if len(title) < 20:
+            if len(title) < 25:
+                continue
+
+            if is_junk_title(title):
                 continue
 
             full_link = urljoin(source["url"], href)
@@ -544,7 +608,7 @@ def get_html_items(source):
                 break
 
     except Exception as e:
-        print(f"خطا در HTML منبع {source['name']}: {e}")
+        print(f"  خطا در HTML منبع {source['name']}: {e}")
 
     return items
 
@@ -585,9 +649,9 @@ def translate_and_format(title, body, source_name, source_kind, link, category):
 ۱. فقط بر اساس اطلاعات موجود در متن بنویس. چیزی اضافه نکن و حدس نزن.
 ۲. تاریخ‌ها، اعداد، مهلت‌ها، نام نهادها و اصطلاحات رسمی را دقیق حفظ کن.
 ۳. اگر خبر درباره قانون است، دقت کن که آیا قانون تصویب شده یا فقط پیشنهاد/طرح/بحث است.
-۴. اگر در متن منبع تاریخ اجرا، مهلت یا جزئیات مهم مشخص نشده، بنویس: «در متن منبع مشخص نشده است».
+۴. اگر در متن منبع تاریخ اجرا، مهلت یا جزئیات مهم مشخص نشده، بنویس: در متن منبع مشخص نشده است.
 ۵. اگر منبع رسانه‌ای است و نه رسمی، در جزئیات با احتیاط اشاره کن که این خبر از منبع رسانه‌ای منتشر شده است.
-۶. نثر فارسی باید روان، واضح و حرفه‌ای باشد؛ نه خشک و نه خیلی عامیانه.
+۶. نثر فارسی باید روان، واضح و حرفه‌ای باشد. نه خشک و نه خیلی عامیانه.
 ۷. اگر خبر برای ایرانیان مقیم پرتغال اهمیت عملی ندارد، متن را خیلی کوتاه و محتاطانه بنویس.
 ۸. متن نباید تبلیغاتی، احساسی یا اغراق‌آمیز باشد.
 ۹. از کپی‌برداری طولانی از متن منبع خودداری کن.
@@ -617,34 +681,23 @@ TAGS: [۳ تا ۵ هشتگ مرتبط فارسی، مثل #پرتغال #مها�
 """
 
     try:
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
-
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "text": prompt
-                        }
-                    ]
-                }
-            ]
-        }
-
-        response = requests.post(
-            api_url,
-            json=payload,
-            timeout=40
+        response = gemini_model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.2,
+                max_output_tokens=1000,
+            )
         )
 
-        result = response.json()
-
-        ai_text = result["candidates"][0]["content"]["parts"][0]["text"]
-
-        return parse_ai_output(ai_text, title)
+        if response.parts:
+            ai_text = response.text
+            return parse_ai_output(ai_text, title)
+        else:
+            print(f"  هوش مصنوعی پاسخ خالی داد برای: {title[:60]}")
+            return None
 
     except Exception as e:
-        print(f"خطا در هوش مصنوعی: {e}")
+        print(f"  خطا در هوش مصنوعی برای [{title[:60]}]: {type(e).__name__}: {e}")
         return None
 
 
@@ -728,7 +781,6 @@ def build_telegram_message(data, source_name, link, group_link):
 👥 گروه زندگی در پرتغال:
 {group_link}"""
 
-    # برای جلوگیری از خطای تلگرام در پیام‌های خیلی طولانی
     if len(message) > 3900:
         message = message[:3800] + "\n\n... متن کوتاه شد. برای جزئیات بیشتر به منبع مراجعه کنید."
 
@@ -756,12 +808,12 @@ def send_to_telegram(message):
         )
 
         if response.status_code == 200:
-            print("پیام با موفقیت به تلگرام ارسال شد.")
+            print("  پیام با موفقیت به تلگرام ارسال شد.")
         else:
-            print(f"خطا در ارسال تلگرام: {response.text}")
+            print(f"  خطا در ارسال تلگرام: {response.text}")
 
     except Exception as e:
-        print(f"خطا در اتصال به تلگرام: {e}")
+        print(f"  خطا در اتصال به تلگرام: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -797,13 +849,17 @@ def main():
             if link in seen:
                 continue
 
+            if is_junk_title(title):
+                seen[link] = True
+                continue
+
             combined_text = f"{title} {summary}"
 
             if not is_relevant(combined_text):
                 seen[link] = True
                 continue
 
-            print(f"خبر مرتبط پیدا شد: {title[:80]}")
+            print(f"  خبر مرتبط پیدا شد: {title[:80]}")
 
             full_text = extract_full_text(link)
 
@@ -833,6 +889,8 @@ def main():
                 send_to_telegram(telegram_message)
 
                 posted += 1
+
+                time.sleep(3)
 
             seen[link] = True
 
