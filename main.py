@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 
 # ─────────────────────────────────────────────
 # غیرفعال کردن هشدارهای SSL
+# بعضی سایت‌های رسمی پرتغال در GitHub Actions
+# ممکن است خطای certificate بدهند.
 # ─────────────────────────────────────────────
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -27,11 +29,12 @@ TG_CHANNEL = os.environ["TELEGRAM_CHANNEL_ID"]
 
 TG_GROUP_LINK = "https://t.me/LifeInPortugalGroup"
 
-SEEN_FILE = "seen_articles.json"
+# نسخه جدید فایل حافظه، تا لینک‌هایی که قبلاً به خاطر خطای Gemini ارسال نشدند دوباره بررسی شوند
+SEEN_FILE = "seen_articles_v2.json"
 
 MAX_PER_RUN = 5
-
-GEMINI_MODEL = "gemini-2.0-flash"
+MAX_ITEMS_PER_SOURCE = 10
+MAX_AI_ATTEMPTS_PER_RUN = 10
 
 
 # ─────────────────────────────────────────────
@@ -399,10 +402,12 @@ SKIP_PATTERNS = [
     "privacidade",
     "privacy",
     "cookie",
+    "cookies",
     "newsletter",
     "facebook",
     "instagram",
     "twitter",
+    "x.com",
     "linkedin",
     "youtube",
     "logótipo",
@@ -424,11 +429,12 @@ SKIP_PATTERNS = [
     "dados pessoais",
     "personal data",
     "política de",
+    "política de privacidade",
 ]
 
 
 # ─────────────────────────────────────────────
-# توابع مربوط به حافظه برنامه
+# حافظه برنامه
 # ─────────────────────────────────────────────
 
 def load_seen():
@@ -447,7 +453,7 @@ def save_seen(seen):
 
 
 # ─────────────────────────────────────────────
-# بررسی اینکه عنوان یک خبر واقعی باشد
+# فیلتر موارد غیرخبری
 # ─────────────────────────────────────────────
 
 def is_junk_title(title):
@@ -480,7 +486,7 @@ def is_relevant(text):
 
 
 # ─────────────────────────────────────────────
-# دریافت متن کامل خبر از یک لینک
+# دریافت متن کامل خبر
 # ─────────────────────────────────────────────
 
 def extract_full_text(url):
@@ -488,7 +494,7 @@ def extract_full_text(url):
         response = requests.get(
             url,
             headers={"User-Agent": "Mozilla/5.0"},
-            timeout=20,
+            timeout=25,
             verify=False
         )
 
@@ -522,7 +528,7 @@ def get_rss_items(source):
     try:
         feed = feedparser.parse(rss_url)
 
-        for entry in feed.entries[:10]:
+        for entry in feed.entries[:MAX_ITEMS_PER_SOURCE]:
             title = entry.get("title", "")
             link = entry.get("link", "")
             summary = entry.get("summary", "")
@@ -555,7 +561,7 @@ def get_html_items(source):
         response = requests.get(
             source["url"],
             headers=headers,
-            timeout=20,
+            timeout=25,
             verify=False
         )
 
@@ -590,7 +596,7 @@ def get_html_items(source):
                 "summary": ""
             })
 
-            if len(items) >= 10:
+            if len(items) >= MAX_ITEMS_PER_SOURCE:
                 break
 
     except Exception as e:
@@ -600,7 +606,7 @@ def get_html_items(source):
 
 
 # ─────────────────────────────────────────────
-# دریافت آیتم‌ها از هر منبع
+# دریافت آیتم‌ها از منبع
 # ─────────────────────────────────────────────
 
 def get_source_items(source):
@@ -616,15 +622,164 @@ def get_source_items(source):
 
 
 # ─────────────────────────────────────────────
+# پیدا کردن مدل فعال Gemini به شکل خودکار
+# ─────────────────────────────────────────────
+
+def get_gemini_model_candidates():
+    fallback_models = [
+        "models/gemini-2.5-flash",
+        "models/gemini-2.5-flash-lite",
+        "models/gemini-2.0-flash",
+        "models/gemini-2.0-flash-lite",
+        "models/gemini-flash-latest",
+        "models/gemini-2.0-flash-001",
+        "models/gemini-1.5-flash-latest"
+    ]
+
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_KEY}"
+
+        response = requests.get(
+            url,
+            timeout=30
+        )
+
+        if response.status_code != 200:
+            print(f"  نتوانستم لیست مدل‌های Gemini را بگیرم. استفاده از لیست پیش‌فرض. پاسخ: {response.status_code}")
+            return fallback_models
+
+        data = response.json()
+        models = data.get("models", [])
+
+        usable = []
+
+        for model in models:
+            name = model.get("name", "")
+            methods = model.get("supportedGenerationMethods", [])
+
+            if "generateContent" not in methods:
+                continue
+
+            if "gemini" not in name.lower():
+                continue
+
+            usable.append(name)
+
+        if not usable:
+            print("  هیچ مدل قابل استفاده‌ای از Gemini پیدا نشد. استفاده از لیست پیش‌فرض.")
+            return fallback_models
+
+        def score_model(name):
+            n = name.lower()
+
+            if "2.5" in n and "flash" in n:
+                return 100
+            if "2.0" in n and "flash" in n:
+                return 90
+            if "flash" in n:
+                return 80
+            if "pro" in n:
+                return 60
+            return 10
+
+        usable = sorted(usable, key=score_model, reverse=True)
+
+        print("  مدل‌های قابل استفاده Gemini پیدا شدند:")
+        for m in usable[:5]:
+            print(f"   - {m}")
+
+        return usable + fallback_models
+
+    except Exception as e:
+        print(f"  خطا در گرفتن لیست مدل‌های Gemini: {e}")
+        return fallback_models
+
+
+GEMINI_MODEL_CANDIDATES = get_gemini_model_candidates()
+
+
+# ─────────────────────────────────────────────
+# فراخوانی Gemini با REST API
+# ─────────────────────────────────────────────
+
+def call_gemini(prompt):
+    for model_name in GEMINI_MODEL_CANDIDATES:
+        if not model_name.startswith("models/"):
+            model_path = f"models/{model_name}"
+        else:
+            model_path = model_name
+
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent?key={GEMINI_KEY}"
+
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "text": prompt
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": 1000
+            }
+        }
+
+        try:
+            response = requests.post(
+                api_url,
+                json=payload,
+                timeout=60
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                candidates = data.get("candidates", [])
+
+                if not candidates:
+                    print(f"  Gemini پاسخ بدون candidates داد با مدل {model_path}")
+                    continue
+
+                parts = candidates[0].get("content", {}).get("parts", [])
+
+                if not parts:
+                    print(f"  Gemini پاسخ بدون متن داد با مدل {model_path}")
+                    continue
+
+                text = parts[0].get("text", "")
+
+                if text:
+                    print(f"  پاسخ Gemini با مدل {model_path} دریافت شد.")
+                    return text
+
+            elif response.status_code == 404:
+                print(f"  مدل در دسترس نیست، امتحان مدل بعدی: {model_path}")
+                continue
+
+            else:
+                print(f"  خطای Gemini با مدل {model_path}: {response.status_code}")
+                print(f"  پاسخ کوتاه Gemini: {response.text[:500]}")
+                continue
+
+        except Exception as e:
+            print(f"  خطا در تماس با Gemini با مدل {model_path}: {e}")
+            continue
+
+    return None
+
+
+# ─────────────────────────────────────────────
 # ارسال متن به Gemini برای ترجمه و بازنویسی
-# (از طریق REST API مستقیم - بدون نیاز به
-#  کتابخانه google.generativeai)
 # ─────────────────────────────────────────────
 
 def translate_and_format(title, body, source_name, source_kind, link, category):
     body = body or ""
 
-    prompt = f"""تو سردبیر یک کانال خبری فارسی برای ایرانیان مقیم پرتغال هستی.
+    prompt = f"""
+تو سردبیر یک کانال خبری فارسی برای ایرانیان مقیم پرتغال هستی.
 
 یک خبر یا اطلاعیه پرتغالی/انگلیسی داری که باید آن را برای مخاطبان فارسی‌زبان آماده کنی.
 
@@ -634,11 +789,11 @@ def translate_and_format(title, body, source_name, source_kind, link, category):
 قوانین بسیار مهم:
 ۱. فقط بر اساس اطلاعات موجود در متن بنویس. چیزی اضافه نکن و حدس نزن.
 ۲. تاریخ‌ها، اعداد، مهلت‌ها، نام نهادها و اصطلاحات رسمی را دقیق حفظ کن.
-۳. اگر خبر درباره قانون است، دقت کن که آیا قانون تصویب شده یا فقط پیشنهاد است.
-۴. اگر در متن منبع تاریخ اجرا یا مهلت مشخص نشده، بنویس: در متن منبع مشخص نشده است.
-۵. اگر منبع رسانه‌ای است و نه رسمی، با احتیاط اشاره کن که از منبع رسانه‌ای است.
+۳. اگر خبر درباره قانون است، دقت کن که آیا قانون تصویب شده یا فقط پیشنهاد/طرح/بحث است.
+۴. اگر در متن منبع تاریخ اجرا، مهلت یا جزئیات مهم مشخص نشده، بنویس: در متن منبع مشخص نشده است.
+۵. اگر منبع رسانه‌ای است و نه رسمی، در جزئیات با احتیاط اشاره کن که این خبر از منبع رسانه‌ای منتشر شده است.
 ۶. نثر فارسی باید روان، واضح و حرفه‌ای باشد. نه خشک و نه خیلی عامیانه.
-۷. اگر خبر برای ایرانیان مقیم پرتغال اهمیت عملی ندارد، متن را خیلی کوتاه بنویس.
+۷. اگر خبر برای ایرانیان مقیم پرتغال اهمیت عملی ندارد، متن را خیلی کوتاه و محتاطانه بنویس.
 ۸. متن نباید تبلیغاتی، احساسی یا اغراق‌آمیز باشد.
 ۹. از کپی‌برداری طولانی از متن منبع خودداری کن.
 ۱۰. خروجی باید برای انتشار در تلگرام مناسب باشد.
@@ -663,44 +818,15 @@ SUMMARY: [خلاصه خبر در ۲ تا ۴ جمله، به اندازه‌ای 
 
 DETAILS: [جزئیات مهم خبر در چند نکته کوتاه و کاربردی. اگر جزئیات مهمی در متن نیست، بنویس: جزئیات بیشتری در متن منبع ارائه نشده است.]
 
-TAGS: [۳ تا ۵ هشتگ مرتبط فارسی، مثل #پرتغال #مهاجرت #اقامت]"""
+TAGS: [۳ تا ۵ هشتگ مرتبط فارسی، مثل #پرتغال #مهاجرت #اقامت]
+"""
 
     try:
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_KEY}"
+        ai_text = call_gemini(prompt)
 
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "text": prompt
-                        }
-                    ]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.2,
-                "maxOutputTokens": 1000
-            }
-        }
-
-        response = requests.post(
-            api_url,
-            json=payload,
-            timeout=60
-        )
-
-        result = response.json()
-
-        if "candidates" not in result:
-            print(f"  خطای API جیمینی: {json.dumps(result, ensure_ascii=False)[:300]}")
+        if not ai_text:
+            print(f"  Gemini نتوانست متن تولید کند برای: {title[:60]}")
             return None
-
-        if not result["candidates"]:
-            print(f"  پاسخ خالی از جیمینی برای: {title[:60]}")
-            return None
-
-        ai_text = result["candidates"][0]["content"]["parts"][0]["text"]
 
         return parse_ai_output(ai_text, title)
 
@@ -772,6 +898,15 @@ def build_telegram_message(data, source_name, link, group_link):
     details = data.get("details", "").strip()
     tags = data.get("tags", "").strip()
 
+    if not summary:
+        summary = "خلاصه خبر در متن منبع مشخص نشده است."
+
+    if not details:
+        details = "جزئیات بیشتری در متن منبع ارائه نشده است."
+
+    if not tags:
+        tags = "#پرتغال"
+
     message = f"""📰 {title}
 
 {summary}
@@ -812,14 +947,14 @@ def send_to_telegram(message):
         response = requests.post(
             url,
             json=payload,
-            timeout=20
+            timeout=25
         )
 
         if response.status_code == 200:
             print("  پیام با موفقیت به تلگرام ارسال شد.")
             return True
         else:
-            print(f"  خطا در ارسال تلگرام: {response.text[:300]}")
+            print(f"  خطا در ارسال تلگرام: {response.text}")
             return False
 
     except Exception as e:
@@ -834,13 +969,17 @@ def send_to_telegram(message):
 def main():
     print("شروع اجرای برنامه")
     print(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
-    print(f"مدل هوش مصنوعی: {GEMINI_MODEL}")
 
     seen = load_seen()
     posted = 0
+    ai_attempts = 0
 
     for source in SOURCES:
         if posted >= MAX_PER_RUN:
+            break
+
+        if ai_attempts >= MAX_AI_ATTEMPTS_PER_RUN:
+            print("به سقف تلاش‌های هوش مصنوعی در این اجرا رسیدیم.")
             break
 
         print(f"بررسی منبع: {source['name']}")
@@ -849,6 +988,10 @@ def main():
 
         for item in items:
             if posted >= MAX_PER_RUN:
+                break
+
+            if ai_attempts >= MAX_AI_ATTEMPTS_PER_RUN:
+                print("به سقف تلاش‌های هوش مصنوعی در این اجرا رسیدیم.")
                 break
 
             title = item.get("title", "")
@@ -881,6 +1024,8 @@ def main():
             if not full_text:
                 full_text = title
 
+            ai_attempts += 1
+
             result = translate_and_format(
                 title=title,
                 body=full_text,
@@ -898,13 +1043,16 @@ def main():
                     group_link=TG_GROUP_LINK
                 )
 
-                if send_to_telegram(telegram_message):
+                sent = send_to_telegram(telegram_message)
+
+                if sent:
                     posted += 1
-                    print(f"  پست شماره {posted} ارسال شد")
-
-                time.sleep(3)
-
-            seen[link] = True
+                    seen[link] = True
+                    time.sleep(3)
+                else:
+                    print("  پیام ارسال نشد، بنابراین این لینک به عنوان دیده‌شده ذخیره نمی‌شود.")
+            else:
+                print("  خروجی قابل ارسال ساخته نشد، بنابراین این لینک به عنوان دیده‌شده ذخیره نمی‌شود.")
 
     save_seen(seen)
 
