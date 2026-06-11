@@ -12,8 +12,6 @@ from datetime import datetime, timezone
 
 # ─────────────────────────────────────────────
 # غیرفعال کردن هشدارهای SSL
-# بعضی سایت‌های رسمی پرتغال در GitHub Actions
-# ممکن است خطای certificate بدهند.
 # ─────────────────────────────────────────────
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -29,12 +27,12 @@ TG_CHANNEL = os.environ["TELEGRAM_CHANNEL_ID"]
 
 TG_GROUP_LINK = "https://t.me/LifeInPortugalGroup"
 
-# نسخه جدید فایل حافظه، تا لینک‌هایی که قبلاً به خاطر خطای Gemini ارسال نشدند دوباره بررسی شوند
 SEEN_FILE = "seen_articles_v2.json"
 
 MAX_PER_RUN = 5
 MAX_ITEMS_PER_SOURCE = 10
 MAX_AI_ATTEMPTS_PER_RUN = 10
+MAX_HASHTAGS = 3
 
 
 # ─────────────────────────────────────────────
@@ -663,6 +661,10 @@ def get_gemini_model_candidates():
             if "gemini" not in name.lower():
                 continue
 
+            n = name.lower()
+            if "tts" in n or "image" in n or "audio" in n or "vision" in n:
+                continue
+
             usable.append(name)
 
         if not usable:
@@ -672,8 +674,10 @@ def get_gemini_model_candidates():
         def score_model(name):
             n = name.lower()
 
-            if "2.5" in n and "flash" in n:
+            if "2.5" in n and "flash" in n and "lite" not in n:
                 return 100
+            if "2.5" in n and "flash" in n:
+                return 95
             if "2.0" in n and "flash" in n:
                 return 90
             if "flash" in n:
@@ -724,7 +728,7 @@ def call_gemini(prompt):
             ],
             "generationConfig": {
                 "temperature": 0.2,
-                "maxOutputTokens": 1000
+                "maxOutputTokens": 2000
             }
         }
 
@@ -761,7 +765,6 @@ def call_gemini(prompt):
 
             else:
                 print(f"  خطای Gemini با مدل {model_path}: {response.status_code}")
-                print(f"  پاسخ کوتاه Gemini: {response.text[:500]}")
                 continue
 
         except Exception as e:
@@ -786,23 +789,30 @@ def translate_and_format(title, body, source_name, source_kind, link, category):
 هدف:
 تولید یک متن فارسی دقیق، روان، قابل فهم برای عموم، و در عین حال حرفه‌ای.
 
-قوانین بسیار مهم:
+قوانین محتوایی:
 ۱. فقط بر اساس اطلاعات موجود در متن بنویس. چیزی اضافه نکن و حدس نزن.
 ۲. تاریخ‌ها، اعداد، مهلت‌ها، نام نهادها و اصطلاحات رسمی را دقیق حفظ کن.
 ۳. اگر خبر درباره قانون است، دقت کن که آیا قانون تصویب شده یا فقط پیشنهاد/طرح/بحث است.
-۴. اگر در متن منبع تاریخ اجرا، مهلت یا جزئیات مهم مشخص نشده، بنویس: در متن منبع مشخص نشده است.
+۴. اگر در متن منبع تاریخ اجرا یا مهلت مشخص نشده، بنویس: در متن منبع مشخص نشده است.
 ۵. اگر منبع رسانه‌ای است و نه رسمی، در جزئیات با احتیاط اشاره کن که این خبر از منبع رسانه‌ای منتشر شده است.
 ۶. نثر فارسی باید روان، واضح و حرفه‌ای باشد. نه خشک و نه خیلی عامیانه.
-۷. اگر خبر برای ایرانیان مقیم پرتغال اهمیت عملی ندارد، متن را خیلی کوتاه و محتاطانه بنویس.
-۸. متن نباید تبلیغاتی، احساسی یا اغراق‌آمیز باشد.
-۹. از کپی‌برداری طولانی از متن منبع خودداری کن.
-۱۰. خروجی باید برای انتشار در تلگرام مناسب باشد.
+۷. متن نباید تبلیغاتی، احساسی یا اغراق‌آمیز باشد.
+۸. از کپی‌برداری طولانی از متن منبع خودداری کن.
+
+قوانین قالب‌بندی بسیار مهم:
+۱. هرگز از علامت ستاره (*) یا دو ستاره (**) یا هیچ علامت Markdown استفاده نکن.
+۲. هرگز از ایموجی یا استیکر استفاده نکن.
+۳. هر نکته در DETAILS باید با علامت • شروع شود و فقط یک خط کوتاه باشد.
+۴. DETAILS حداکثر ۵ نکته داشته باشد. فقط مهم‌ترین نکات کاربردی را انتخاب کن.
+۵. SUMMARY حداکثر ۴ جمله کامل باشد و هیچ جمله‌ای ناتمام نماند.
+۶. TITLE حداکثر ۶۰ حرف باشد.
+۷. همه جمله‌ها باید کامل تمام شوند. هرگز جمله را نیمه‌کاره رها نکن.
+۸. در TAGS فقط ۲ یا حداکثر ۳ هشتگ بده. هشتگ‌ها باید کوتاه، تک‌کلمه‌ای و دقیقاً درباره موضوع اصلی خبر باشند. از هشتگ ترکیبی با خط زیر (مثل #بیمه_درمانی) استفاده نکن.
 
 اطلاعات منبع:
 نام منبع: {source_name}
 نوع منبع: {source_kind}
 دسته‌بندی: {category}
-لینک: {link}
 
 عنوان اصلی:
 {title}
@@ -814,11 +824,11 @@ def translate_and_format(title, body, source_name, source_kind, link, category):
 
 TITLE: [عنوان فارسی کوتاه، واضح و خبری]
 
-SUMMARY: [خلاصه خبر در ۲ تا ۴ جمله، به اندازه‌ای که اصل موضوع را بیان کند و کاربر دچار ابهام نشود]
+SUMMARY: [خلاصه خبر در ۲ تا ۴ جمله کامل]
 
-DETAILS: [جزئیات مهم خبر در چند نکته کوتاه و کاربردی. اگر جزئیات مهمی در متن نیست، بنویس: جزئیات بیشتری در متن منبع ارائه نشده است.]
+DETAILS: [حداکثر ۵ نکته کوتاه که هر کدام با • شروع می‌شود]
 
-TAGS: [۳ تا ۵ هشتگ مرتبط فارسی، مثل #پرتغال #مهاجرت #اقامت]
+TAGS: [فقط ۲ تا ۳ هشتگ کوتاه و تک‌کلمه‌ای مثل #مهاجرت #اقامت]
 """
 
     try:
@@ -889,14 +899,75 @@ def parse_ai_output(text, fallback_title):
 
 
 # ─────────────────────────────────────────────
+# پاک‌سازی متن از علامت‌های Markdown
+# ─────────────────────────────────────────────
+
+def clean_text(text):
+    if not text:
+        return ""
+
+    text = text.replace("**", "")
+    text = text.replace("__", "")
+    text = text.replace("##", "")
+
+    cleaned_lines = []
+
+    for line in text.split("\n"):
+        line = line.strip()
+
+        if not line:
+            continue
+
+        if line.startswith("* "):
+            line = "• " + line[2:]
+        elif line.startswith("- "):
+            line = "• " + line[2:]
+        elif line.startswith("*"):
+            line = "• " + line[1:].strip()
+
+        cleaned_lines.append(line)
+
+    return "\n".join(cleaned_lines)
+
+
+# ─────────────────────────────────────────────
+# محدود کردن تعداد هشتگ‌ها
+# ─────────────────────────────────────────────
+
+def limit_hashtags(tags):
+    if not tags:
+        return "#پرتغال"
+
+    found = re.findall(r'#[^\s#]+', tags)
+
+    if not found:
+        return "#پرتغال"
+
+    return " ".join(found[:MAX_HASHTAGS])
+
+
+# ─────────────────────────────────────────────
+# آماده‌سازی متن برای HTML تلگرام
+# ─────────────────────────────────────────────
+
+def escape_html(text):
+    if not text:
+        return ""
+    text = text.replace("&", "&amp;")
+    text = text.replace("<", "&lt;")
+    text = text.replace(">", "&gt;")
+    return text
+
+
+# ─────────────────────────────────────────────
 # ساخت پیام نهایی تلگرام
 # ─────────────────────────────────────────────
 
 def build_telegram_message(data, source_name, link, group_link):
-    title = data.get("title", "").strip()
-    summary = data.get("summary", "").strip()
-    details = data.get("details", "").strip()
-    tags = data.get("tags", "").strip()
+    title = clean_text(data.get("title", ""))
+    summary = clean_text(data.get("summary", ""))
+    details = clean_text(data.get("details", ""))
+    tags = limit_hashtags(clean_text(data.get("tags", "")))
 
     if not summary:
         summary = "خلاصه خبر در متن منبع مشخص نشده است."
@@ -904,24 +975,39 @@ def build_telegram_message(data, source_name, link, group_link):
     if not details:
         details = "جزئیات بیشتری در متن منبع ارائه نشده است."
 
-    if not tags:
-        tags = "#پرتغال"
+    # محدود کردن طول جزئیات
+    if len(details) > 900:
+        detail_lines = details.split("\n")
+        kept_lines = []
+        total = 0
+        for dl in detail_lines:
+            if total + len(dl) > 850:
+                break
+            kept_lines.append(dl)
+            total += len(dl)
+        details = "\n".join(kept_lines)
+        if not details:
+            details = "برای مطالعه جزئیات کامل به لینک منبع مراجعه کنید."
 
-    message = f"""📰 {title}
+    title_html = escape_html(title)
+    summary_html = escape_html(summary)
+    details_html = escape_html(details)
+    tags_html = escape_html(tags)
+    source_html = escape_html(source_name)
 
-{summary}
+    message = f"""<b>{title_html}</b>
 
-📋 جزئیات مهم خبر:
-{details}
+{summary_html}
 
-برای دانستن جزئیات بیشتر به لینک منبع مراجعه کنید:
+<b>جزئیات مهم خبر</b>
+{details_html}
 
-🔗 {source_name}
+<b>منبع:</b> {source_html}
 {link}
 
-{tags}
+{tags_html}
 
-👥 گروه زندگی در پرتغال:
+<b>گروه زندگی در پرتغال را با دیگران به اشتراک بگذارید</b>
 {group_link}"""
 
     if len(message) > 3900:
@@ -932,15 +1018,20 @@ def build_telegram_message(data, source_name, link, group_link):
 
 # ─────────────────────────────────────────────
 # ارسال پیام به تلگرام
+# (با پیش‌نمایش کوچک تصویر خبر)
 # ─────────────────────────────────────────────
 
-def send_to_telegram(message):
+def send_to_telegram(message, link):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
 
     payload = {
         "chat_id": TG_CHANNEL,
         "text": message,
-        "disable_web_page_preview": False
+        "parse_mode": "HTML",
+        "link_preview_options": {
+            "url": link,
+            "prefer_small_media": True
+        }
     }
 
     try:
@@ -954,7 +1045,25 @@ def send_to_telegram(message):
             print("  پیام با موفقیت به تلگرام ارسال شد.")
             return True
         else:
-            print(f"  خطا در ارسال تلگرام: {response.text}")
+            print(f"  خطا در ارسال تلگرام: {response.text[:300]}")
+
+            # تلاش دوم: بدون قالب‌بندی HTML
+            plain_payload = {
+                "chat_id": TG_CHANNEL,
+                "text": message.replace("<b>", "").replace("</b>", ""),
+                "link_preview_options": {
+                    "url": link,
+                    "prefer_small_media": True
+                }
+            }
+
+            retry_response = requests.post(url, json=plain_payload, timeout=25)
+
+            if retry_response.status_code == 200:
+                print("  پیام در تلاش دوم (بدون قالب‌بندی) ارسال شد.")
+                return True
+
+            print(f"  تلاش دوم هم ناموفق بود: {retry_response.text[:300]}")
             return False
 
     except Exception as e:
@@ -1043,7 +1152,7 @@ def main():
                     group_link=TG_GROUP_LINK
                 )
 
-                sent = send_to_telegram(telegram_message)
+                sent = send_to_telegram(telegram_message, link)
 
                 if sent:
                     posted += 1
