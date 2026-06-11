@@ -2,31 +2,44 @@ name: Portugal News Bot
 
 on:
   schedule:
-    - cron: "0 */4 * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: portugal-news-bot
+  cancel-in-progress: true
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: دریافت فایل‌ها
+        uses: actions/checkout@v4
+
+      - name: نصب Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt
-      - run: python main.py
+
+      - name: نصب ابزارها
+        run: pip install -r requirements.txt
+
+      - name: اجرای ربات
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          PYTHONUNBUFFERED: "1"
+        run: python -u main.py
 
-      - name: Save memory
+      - name: ذخیره حافظه خبرهای دیده‌شده
         run: |
-          git config --global user.name "bot"
+          git config --global user.name "portugal-news-bot"
           git config --global user.email "bot@example.com"
           git add seen_articles_v2.json || true
-          git commit -m "update memory" || echo "no changes"
-          git push || echo "no changes"
+          git commit -m "Update seen articles" || echo "No memory changes"
+          git push || echo "No push needed"
